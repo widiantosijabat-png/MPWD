@@ -1,0 +1,223 @@
+---
+title: "Tugas Pertemuan 3 - Regresi dengan Peubah Lag (Koyck, DLM, ARDL)"
+author: "Widianto Sijabat"
+date: "9-9-2026"
+output:
+  html_document:
+    theme: yeti
+    toc: true
+    toc_float: true
+    number_sections: true
+  word_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+## Packages
+
+```{r}
+library(dLagM)
+library(dynlm)
+library(MLmetrics)
+library(lmtest)
+library(car)
+```
+
+# Impor dan Eksplorasi Data
+
+```{r}
+data <- read.csv("C:\\Users\\AXIOO\\Downloads\\NewDelhi_Air_quality.csv")
+str(data)
+```
+
+```{r}
+polutan <- c("CO", "no2", "o3", "pm10", "pm25", "so2")
+korelasi <- sapply(polutan, function(v) cor(data$AQI, data[[v]]))
+sort(korelasi, decreasing = TRUE)
+```
+
+Berdasarkan nilai korelasi di atas, **O3** memiliki korelasi positif terbesar terhadap AQI, sehingga dipilih sebagai peubah independen (X).
+
+```{r}
+data.pakai <- data.frame(Yt = data$AQI, Xt = data$o3)
+str(data.pakai)
+```
+
+# Pembagian Data
+
+```{r}
+train <- data.pakai[1:58, ]
+test  <- data.pakai[59:72, ]
+
+train.ts <- ts(train)
+test.ts  <- ts(test)
+data.ts  <- ts(data.pakai)
+
+nrow(train); nrow(test)
+```
+
+# Model Koyck
+
+Model Koyck mengasumsikan bahwa pengaruh lag $X$ terhadap $Y$ semakin kecil seiring bertambahnya jarak waktu, dan direpresentasikan melalui peubah lag dari $Y$ ($Y_{t-1}$).
+
+```{r}
+model.koyck <- koyckDlm(x = train$Xt, y = train$Yt)
+summary(model.koyck)
+AIC(model.koyck)
+BIC(model.koyck)
+```
+
+Nilai p-value peubah $X_t$ dan $Y_{t-1}$ keduanya kurang dari 0.05, sehingga kedua peubah tersebut berpengaruh signifikan terhadap AQI. Model yang terbentuk adalah:
+
+$$\hat{Y_t}=0{,}2626+0{,}2582X_t+0{,}4294Y_{t-1}$$
+
+## Peramalan dan Akurasi Koyck
+
+```{r}
+fore.koyck <- forecast(model = model.koyck, x = test$Xt, h = nrow(test))
+fore.koyck
+mape.koyck <- MAPE(fore.koyck$forecasts, test$Yt)
+mape.koyck
+GoF(model.koyck)
+```
+
+# Distributed Lag Model (DLM)
+
+## Pemodelan Awal (Lag = 1)
+
+```{r}
+model.dlm1 <- dlm(x = train$Xt, y = train$Yt, q = 1)
+summary(model.dlm1)
+AIC(model.dlm1)
+BIC(model.dlm1)
+```
+
+```{r}
+fore.dlm1 <- forecast(model = model.dlm1, x = test$Xt, h = nrow(test))
+mape.dlm1 <- MAPE(fore.dlm1$forecasts, test$Yt)
+mape.dlm1
+GoF(model.dlm1)
+```
+
+## Penentuan Lag Optimum DLM
+
+```{r}
+finiteDLMauto(formula = Yt ~ Xt,
+              data = data.frame(train), q.min = 1, q.max = 10,
+              model.type = "dlm", error.type = "AIC", trace = TRUE)
+```
+
+nilai AIC terkecil diperoleh pada **lag = 10**.
+
+```{r}
+model.dlm2 <- dlm(x = train$Xt, y = train$Yt, q = 10)
+summary(model.dlm2)
+AIC(model.dlm2)
+BIC(model.dlm2)
+```
+
+## Peramalan dan Akurasi DLM Lag Optimum
+
+```{r}
+fore.dlm2 <- forecast(model = model.dlm2, x = test$Xt, h = nrow(test))
+mape.dlm2 <- MAPE(fore.dlm2$forecasts, test$Yt)
+mape.dlm2
+GoF(model.dlm2)
+```
+
+# Model Autoregressive Distributed Lag (ARDL)
+
+## Pemodelan Awal (p=1, q=1)
+
+```{r}
+model.ardl1 <- ardlDlm(formula = Yt ~ Xt, data = train, p = 1, q = 1)
+summary(model.ardl1)
+AIC(model.ardl1)
+BIC(model.ardl1)
+```
+
+## Penentuan Lag Optimum ARDL
+
+```{r}
+model.ardl.opt <- ardlBoundOrders(data = data.frame(train), ic = "AIC",
+                                   formula = Yt ~ Xt, max.p = 6, max.q = 6)
+model.ardl.opt$Stat.table
+model.ardl.opt$min.Stat
+```
+
+```{r}
+tab <- model.ardl.opt$Stat.table
+idx <- which(tab == min(tab), arr.ind = TRUE)
+p.opt <- as.numeric(sub("p = ", "", rownames(tab)[idx[1, 1]]))
+q.opt <- as.numeric(sub("q = ", "", colnames(tab)[idx[1, 2]]))
+cat("p optimum =", p.opt, " | q optimum =", q.opt, "\n")
+```
+
+```{r}
+model.ardl <- ardlDlm(formula = Yt ~ Xt, data = train, p = 2, q = 1)
+summary(model.ardl)
+AIC(model.ardl)
+BIC(model.ardl)
+```
+
+Hasil menunjukkan bahwa $X_t$ dan $Y_{t-1}$ berpengaruh signifikan terhadap AQI pada taraf nyata 5%, sedangkan $X_{t-1}$ dan $X_{t-2}$ tidak signifikan. Model keseluruhan yang terbentuk adalah:
+
+$$\hat{Y_t}=-0{,}2735+0{,}4904X_t-0{,}1095X_{t-1}-0{,}0023X_{t-2}+0{,}1891Y_{t-1}$$
+
+## Peramalan dan Akurasi ARDL Lag Optimum
+
+```{r}
+fore.ardl <- forecast(model = model.ardl, x = test$Xt, h = nrow(test))
+fore.ardl
+mape.ardl <- MAPE(fore.ardl$forecasts, test$Yt)
+mape.ardl
+GoF(model.ardl)
+```
+
+# Perbandingan Kinerja Model
+
+```{r}
+akurasi <- data.frame(
+  Model = c("Koyck", "DLM (q=1)", "DLM (q=10, optimum)", "ARDL (p=2,q=1, optimum)"),
+  AIC = c(AIC(model.koyck), AIC(model.dlm1), AIC(model.dlm2), AIC(model.ardl)),
+  BIC = c(BIC(model.koyck), BIC(model.dlm1), BIC(model.dlm2), BIC(model.ardl)),
+  MAPE_Train = c(GoF(model.koyck)["model.koyck","MAPE"],
+                 GoF(model.dlm1)["model.dlm1","MAPE"],
+                 GoF(model.dlm2)["model.dlm2","MAPE"],
+                 GoF(model.ardl)["model.ardl","MAPE"]),
+  MAPE_Test  = c(mape.koyck, mape.dlm1, mape.dlm2, mape.ardl)
+)
+akurasi
+```
+
+Berdasarkan nilai **MAPE data uji**, model **ARDL (p=2, q=1)** dengan lag optimum memberikan performa peramalan terbaik (MAPE terkecil), diikuti oleh DLM (q=1), DLM (q=10), dan terakhir model Koyck. Model ARDL unggul karena mampu menangkap baik pengaruh lag dari X maupun dinamika autoregressive dari Y itu sendiri, sehingga peramalannya paling mendekati data aktual.
+
+```{r}
+par(mfrow = c(1, 1))
+
+plot(1:nrow(test), test$Yt, type = "b", col = "black", pch = 16,
+     xlab = "Periode (data uji)", ylab = "AQI",
+     ylim = range(c(test$Yt, fore.koyck$forecasts, fore.dlm1$forecasts,
+                    fore.dlm2$forecasts, fore.ardl$forecasts)),
+     main = "Perbandingan Hasil Peramalan AQI")
+
+points(1:nrow(test), fore.koyck$forecasts, col = "red");    lines(1:nrow(test), fore.koyck$forecasts, col = "red")
+points(1:nrow(test), fore.dlm1$forecasts, col = "blue");    lines(1:nrow(test), fore.dlm1$forecasts, col = "blue")
+points(1:nrow(test), fore.dlm2$forecasts, col = "orange");  lines(1:nrow(test), fore.dlm2$forecasts, col = "orange")
+points(1:nrow(test), fore.ardl$forecasts, col = "green");   lines(1:nrow(test), fore.ardl$forecasts, col = "green")
+
+legend("topright",
+       c("Aktual", "Koyck", "DLM (q=1)", "DLM (q=10)", "ARDL (p=2,q=1)"),
+       lty = 1, pch = c(16, 1, 1, 1, 1),
+       col = c("black", "red", "blue", "orange", "green"), cex = 0.8)
+```
+
+Dari plot di atas, terlihat bahwa garis hasil peramalan model **ARDL** (hijau) dan **DLM q=1** (biru) paling mendekati garis data aktual (hitam) secara konsisten, sejalan dengan nilai MAPE yang mereka miliki. Model Koyck (merah) tampak sedikit lebih menyimpang dibanding model-model lain, meski secara umum seluruh model masih mampu menangkap tren pergerakan AQI dengan baik (MAPE seluruh model \< 5%).
+
+# Kesimpulan
+
+1.  Lag optimum yang diperoleh: Koyck menggunakan struktur geometric lag (tidak memerlukan penentuan q secara eksplisit), DLM optimum pada **q = 10** (berdasarkan AIC), dan ARDL optimum pada **p = 2, q = 1** (berdasarkan AIC).
+2.  Berdasarkan metrik **MAPE data uji**, model **ARDL (p=2, q=1)** merupakan model terbaik untuk meramalkan AQI menggunakan O3 sebagai prediktor, karena memiliki MAPE terkecil dan visualisasi peramalan yang paling mendekati data aktual.
