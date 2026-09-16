@@ -1,0 +1,465 @@
+---
+title: "Tugas Pertemuan 4 "
+author: "Widianto Sijabat"
+date: "2026-09-16"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    number_sections: false
+    theme: cosmo
+    code_folding: show
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, fig.align = "center")
+n <- 300
+```
+
+# Pendahuluan
+
+$n=300$ data
+
+- **MA(2)** dengan $\theta_1=0.4$, $\theta_2=0.6$
+- **AR(2)** dengan $\phi_1=0.5$, $\phi_2=0.2$
+- **ARMA(2,2)** dengan $\phi_1=0.5$, $\phi_2=0.2$, $\theta_1=0.4$, $\theta_2=0.6$
+
+Buat plot time series, plot ACF, plot PACF dan plot EACF. Idenifikasi apakah data tersebut stasioner
+
+Buat scatterplot antara 𝑌𝑡 dengan 𝑌𝑡−1, 𝑌𝑡 dengan 𝑌𝑡−2 serta 𝑌𝑡 dengan 𝑌𝑡−3
+
+Hitung autokorelasi masing masing baik dari data bangkitan maupun secara teoritis
+
+## Fungsi EACF
+
+```{r eacf-function}
+eacf <- function (z, ar.max = 7, ma.max = 13, plot_table = TRUE) {
+  lag1 <- function(z, lag = 1) { c(rep(NA, lag), z[1:(length(z) - lag)]) }
+  reupm <- function(m1, nrow, ncol) {
+    k <- ncol - 1
+    m2 <- NULL
+    for (i in 1:k) {
+      i1 <- i + 1
+      work <- lag1(m1[, i])
+      work[1] <- -1
+      temp <- m1[, i1] - work * m1[i1, i1] / m1[i, i]
+      temp[i1] <- 0
+      m2 <- cbind(m2, temp)
+    }
+    m2
+  }
+  ceascf <- function(m, cov1, nar, ncol, count, ncov, z, zm) {
+    result <- 0 * seq(1, nar + 1)
+    result[1] <- cov1[ncov + count]
+    for (i in 1:nar) {
+      temp <- cbind(z[-(1:i)], zm[-(1:i), 1:i]) %*% c(1, -m[1:i, i])
+      result[i + 1] <- acf(temp, plot = FALSE, lag.max = count, drop.lag.0 = FALSE)$acf[count + 1]
+    }
+    result
+  }
+  ar.max <- ar.max + 1
+  ma.max <- ma.max + 1
+  nar <- ar.max - 1
+  nma <- ma.max
+  ncov <- nar + nma + 2
+  nrow <- nar + nma + 1
+  ncol <- nrow - 1
+  z <- z - mean(z)
+  zm <- NULL
+  for (i in 1:nar) zm <- cbind(zm, lag1(z, lag = i))
+  cov1 <- acf(z, lag.max = ncov, plot = FALSE, drop.lag.0 = FALSE)$acf
+  cov1 <- c(rev(cov1[-1]), cov1)
+  ncov <- ncov + 1
+  m1 <- matrix(0, ncol = ncol, nrow = nrow)
+  for (i in 1:ncol) m1[1:i, i] <- ar.ols(z, order.max = i, aic = FALSE, demean = FALSE, intercept = FALSE)$ar
+  eacfm <- NULL
+  for (i in 1:nma) {
+    m2 <- reupm(m1 = m1, nrow = nrow, ncol = ncol)
+    ncol <- ncol - 1
+    eacfm <- cbind(eacfm, ceascf(m2, cov1, nar, ncol, i, ncov, z, zm))
+    m1 <- m2
+  }
+  work <- 1:(nar + 1)
+  work <- length(z) - work + 1
+  symbol <- NULL
+  for (i in 1:nma) {
+    work <- work - 1
+    symbol <- cbind(symbol, ifelse(abs(eacfm[, i]) > 2 / work^.5, 'x', 'o'))
+  }
+  rownames(symbol) <- 0:(ar.max - 1)
+  colnames(symbol) <- 0:(ma.max - 1)
+  if (plot_table) {
+    cat('AR/MA\n')
+    print(symbol, quote = FALSE)
+  }
+  invisible(list(eacf = eacfm, ar.max = ar.max, ma.max = ma.max, symbol = symbol))
+}
+
+# Fungsi bantu: autokorelasi empiris pada lag k = 1,2,3
+empirical_acf <- function(y, klags = 1:3) {
+  sapply(klags, function(k) cor(y[-(1:k)], y[1:(length(y) - k)]))
+}
+```
+
+------------------------------------------------------------------------
+
+# 1. Proses MA(2)
+
+$$Y_t = e_t + \theta_1 e_{t-1} + \theta_2 e_{t-2}$$
+
+dengan $\theta_1 = 0.4$ dan $\theta_2 = 0.6$.
+
+## Pembangkitan Data
+
+**Manual (loop):**
+
+```{r ma2-manual}
+theta1 <- 0.4
+theta2 <- 0.6
+
+set.seed(128)
+wn <- rnorm(n)
+ma2 <- numeric(n)
+ma2[1] <- wn[1]
+ma2[2] <- wn[2] + theta1 * wn[1]
+for (i in 3:n) {
+  ma2[i] <- wn[i] + theta1 * wn[i - 1] + theta2 * wn[i - 2]
+}
+head(ma2)
+```
+
+**Dengan `arima.sim()`:**
+
+```{r ma2-sim}
+set.seed(128)
+ma2.sim <- arima.sim(list(order = c(0, 0, 2), ma = c(theta1, theta2)), n = n)
+head(ma2.sim)
+```
+
+## Plot Time Series
+
+```{r ma2-ts, fig.width=9, fig.height=4}
+par(mfrow = c(1, 2))
+ts.plot(ma2, main = "MA(2) - Manual", ylab = "Yt")
+ts.plot(ma2.sim, main = "MA(2) - arima.sim", ylab = "Yt")
+par(mfrow = c(1, 1))
+```
+
+Plot time series menunjukkan data berfluktuasi di sekitar nilai tengah nol tanpa tren maupun perubahan ragam yang sistematis
+
+## Plot ACF
+
+```{r ma2-acf, fig.width=9, fig.height=4}
+par(mfrow = c(1, 2))
+acf(ma2, main = "ACF MA(2) - Manual")
+acf(ma2.sim, main = "ACF MA(2) - arima.sim")
+par(mfrow = c(1, 1))
+```
+
+ACF signifikan pada lag 1 dan lag 2, lalu terputus (cuts off) menuju nol pada lag $\ge 3$
+
+## Plot PACF
+
+```{r ma2-pacf, fig.width=9, fig.height=4}
+par(mfrow = c(1, 2))
+pacf(ma2, main = "PACF MA(2) - Manual")
+pacf(ma2.sim, main = "PACF MA(2) - arima.sim")
+par(mfrow = c(1, 1))
+```
+
+PACF menurun bertahap menuju nol
+
+## Plot EACF
+
+```{r ma2-eacf}
+cat("EACF - Data Manual\n")
+eacf(ma2, ar.max = 5, ma.max = 8)
+
+cat("\nEACF - Data arima.sim\n")
+eacf(ma2.sim, ar.max = 5, ma.max = 8)
+```
+
+Segitiga nol ('o') mulai konsisten pada baris AR = 0, kolom MA $\ge 2$
+
+### Kesimpulan kestasioneran:
+
+berdasarkan plot time series, ACF (cuts off setelah lag 2), dan PACF (tails off), proses MA(2) stasioner
+
+## Scatterplot Antar Lag
+
+```{r ma2-scatter, fig.width=12, fig.height=4}
+par(mfrow = c(1, 3))
+for (k in 1:3) {
+  yt  <- ma2[-(1:k)]
+  ytk <- ma2[1:(n - k)]
+  plot(ytk, yt, xlab = bquote(Y[t - .(k)]), ylab = expression(Y[t]),
+       main = paste0("Yt vs Yt-", k), pch = 19, col = "steelblue")
+}
+par(mfrow = c(1, 1))
+```
+
+Scatterplot $Y_t$ vs $Y_{t-1}$ dan $Y_t$ vs $Y_{t-2}$ menunjukkan pola hubungan linear positif yang cukup jelas, sedangkan $Y_t$ vs $Y_{t-3}$ menunjukkan sebaran yang jauh lebih acak , konsisten dengan MA(2) yang hanya berkorelasi hingga lag ke-2.
+
+## Autokorelasi: Empiris vs Teoritis
+
+$$\rho_1 = \frac{\theta_1+\theta_1\theta_2}{1+\theta_1^2+\theta_2^2}, \qquad \rho_2 = \frac{\theta_2}{1+\theta_1^2+\theta_2^2}, \qquad \rho_k = 0 \; \text{untuk} \; k \ge 3$$
+
+```{r ma2-acf-table}
+emp_manual <- empirical_acf(ma2)
+emp_sim    <- empirical_acf(ma2.sim)
+theo_ma2   <- ARMAacf(ma = c(theta1, theta2), lag.max = 3)[2:4]
+
+tabel_ma2 <- data.frame(
+  Lag = 1:3,
+  Empiris_Manual = round(emp_manual, 4),
+  Empiris_arimasim = round(emp_sim, 4),
+  Teoritis = round(theo_ma2, 4)
+)
+knitr::kable(tabel_ma2)
+```
+
+Nilai autokorelasi empiris mendekati nilai teoritis pada lag 1 dan 2, dan sama-sama mendekati nol pada lag 3
+
+# 2. Proses AR(2)
+
+$$Y_t = \phi_1 Y_{t-1} + \phi_2 Y_{t-2} + e_t$$
+
+dengan $\phi_1 = 0.5$ dan $\phi_2 = 0.2$.
+
+## Pembangkitan Data
+
+**Manual (loop):**
+
+```{r ar2-manual}
+phi1 <- 0.5
+phi2 <- 0.2
+
+set.seed(128)
+wn2 <- rnorm(n)
+ar2 <- numeric(n)
+ar2[1] <- wn2[1]
+ar2[2] <- phi1 * ar2[1] + wn2[2]
+for (i in 3:n) {
+  ar2[i] <- phi1 * ar2[i - 1] + phi2 * ar2[i - 2] + wn2[i]
+}
+head(ar2)
+```
+
+**Dengan `arima.sim()`:**
+
+```{r ar2-sim}
+set.seed(128)
+ar2.sim <- arima.sim(list(order = c(2, 0, 0), ar = c(phi1, phi2)), n = n)
+head(ar2.sim)
+```
+
+## Plot Time Series
+
+```{r ar2-ts, fig.width=9, fig.height=4}
+par(mfrow = c(1, 2))
+ts.plot(ar2, main = "AR(2) - Manual", ylab = "Yt")
+ts.plot(ar2.sim, main = "AR(2) - arima.sim", ylab = "Yt")
+par(mfrow = c(1, 1))
+```
+
+Data berosilasi di sekitar nol dengan ragam relatif konstan, tanpa tren
+
+## Plot ACF
+
+```{r ar2-acf, fig.width=9, fig.height=4}
+par(mfrow = c(1, 2))
+acf(ar2, main = "ACF AR(2) - Manual")
+acf(ar2.sim, main = "ACF AR(2) - arima.sim")
+par(mfrow = c(1, 1))
+```
+
+ACF menurun secara bertahap/eksponensial menuju nol
+
+## Plot PACF
+
+```{r ar2-pacf, fig.width=9, fig.height=4}
+par(mfrow = c(1, 2))
+pacf(ar2, main = "PACF AR(2) - Manual")
+pacf(ar2.sim, main = "PACF AR(2) - arima.sim")
+par(mfrow = c(1, 1))
+```
+
+PACF signifikan pada lag 1 dan 2, lalu **terputus (cuts off)** untuk lag $\ge 3$
+
+## Plot EACF
+
+```{r ar2-eacf}
+cat("EACF - Data Manual\n")
+eacf(ar2, ar.max = 5, ma.max = 8)
+
+cat("\nEACF - Data arima.sim\n")
+eacf(ar2.sim, ar.max = 5, ma.max = 8)
+```
+
+Segitiga nol konsisten mulai baris AR = 2, kolom MA = 0
+
+### Kesimpulan kestasioneran:
+
+berdasarkan plot time series, ACF (tails off), dan PACF (cuts off setelah lag 2), proses AR(2) **stasioner**.
+
+## Scatterplot Antar Lag
+
+```{r ar2-scatter, fig.width=12, fig.height=4}
+par(mfrow = c(1, 3))
+for (k in 1:3) {
+  yt  <- ar2[-(1:k)]
+  ytk <- ar2[1:(n - k)]
+  plot(ytk, yt, xlab = bquote(Y[t - .(k)]), ylab = expression(Y[t]),
+       main = paste0("Yt vs Yt-", k), pch = 19, col = "darkorange")
+}
+par(mfrow = c(1, 1))
+```
+
+Ketiga scatterplot menunjukkan pola hubungan linear positif, dengan kekuatan hubungan yang melemah bertahap seiring bertambahnya lag
+
+## Autokorelasi: Empiris vs Teoritis
+
+$$\rho_1 = \frac{\phi_1}{1-\phi_2}, \qquad \rho_k = \phi_1\rho_{k-1}+\phi_2\rho_{k-2} \; \text{untuk} \; k \ge 2$$
+
+```{r ar2-acf-table}
+emp_manual_ar <- empirical_acf(ar2)
+emp_sim_ar    <- empirical_acf(ar2.sim)
+theo_ar2      <- ARMAacf(ar = c(phi1, phi2), lag.max = 3)[2:4]
+
+tabel_ar2 <- data.frame(
+  Lag = 1:3,
+  Empiris_Manual = round(emp_manual_ar, 4),
+  Empiris_arimasim = round(emp_sim_ar, 4),
+  Teoritis = round(theo_ar2, 4)
+)
+knitr::kable(tabel_ar2)
+```
+
+Nilai autokorelasi empiris cukup dekat dengan nilai teoritis pada lag 1-3
+
+# 3. Proses ARMA(2,2)
+
+Proses ARMA(2,2) didefinisikan sebagai:
+
+$$Y_t = \phi_1 Y_{t-1} + \phi_2 Y_{t-2} + e_t + \theta_1 e_{t-1} + \theta_2 e_{t-2}$$
+
+dengan $\phi_1=0.5$, $\phi_2=0.2$, $\theta_1=0.4$, $\theta_2=0.6$.
+
+## Pembangkitan Data
+
+**Manual (loop):**
+
+```{r arma22-manual}
+set.seed(128)
+wn3 <- rnorm(n)
+arma22 <- numeric(n)
+arma22[1] <- wn3[1]
+arma22[2] <- phi1 * arma22[1] + wn3[2] + theta1 * wn3[1]
+for (i in 3:n) {
+  arma22[i] <- phi1 * arma22[i - 1] + phi2 * arma22[i - 2] +
+    wn3[i] + theta1 * wn3[i - 1] + theta2 * wn3[i - 2]
+}
+head(arma22)
+```
+
+**Dengan `arima.sim()`:**
+
+```{r arma22-sim}
+set.seed(128)
+arma22.sim <- arima.sim(list(order = c(2, 0, 2), ar = c(phi1, phi2), ma = c(theta1, theta2)), n = n)
+head(arma22.sim)
+```
+
+## Plot Time Series
+
+```{r arma22-ts, fig.width=9, fig.height=4}
+par(mfrow = c(1, 2))
+ts.plot(arma22, main = "ARMA(2,2) - Manual", ylab = "Yt")
+ts.plot(arma22.sim, main = "ARMA(2,2) - arima.sim", ylab = "Yt")
+par(mfrow = c(1, 1))
+```
+
+Data berosilasi di sekitar nol dengan ragam stabil, tanpa tren
+
+## Plot ACF
+
+```{r arma22-acf, fig.width=9, fig.height=4}
+par(mfrow = c(1, 2))
+acf(arma22, main = "ACF ARMA(2,2) - Manual")
+acf(arma22.sim, main = "ACF ARMA(2,2) - arima.sim")
+par(mfrow = c(1, 1))
+```
+
+ACF menurun bertahap menuju nol
+
+## Plot PACF
+
+```{r arma22-pacf, fig.width=9, fig.height=4}
+par(mfrow = c(1, 2))
+pacf(arma22, main = "PACF ARMA(2,2) - Manual")
+pacf(arma22.sim, main = "PACF ARMA(2,2) - arima.sim")
+par(mfrow = c(1, 1))
+```
+
+PACF menurun bertahap menuju nol
+
+## Plot EACF
+
+```{r arma22-eacf}
+cat("EACF - Data Manual\n")
+eacf(arma22, ar.max = 5, ma.max = 8)
+
+cat("\nEACF - Data arima.sim\n")
+eacf(arma22.sim, ar.max = 5, ma.max = 8)
+```
+
+Pada proses campuran, pola segitiga nol pada EACF cenderung kurang tegas dibanding proses murni akibat superposisi kedua komponen; namun segitiga nol lebih konsisten muncul di sekitar baris AR = 2, kolom MA = 2
+
+### Kesimpulan kestasioneran:
+
+berdasarkan plot time series serta ACF & PACF yang sama-sama tails off, proses ARMA(2,2) stasioner dan dapat diasumsikan invertible
+
+## Scatterplot Antar Lag
+
+```{r arma22-scatter, fig.width=12, fig.height=4}
+par(mfrow = c(1, 3))
+for (k in 1:3) {
+  yt  <- arma22[-(1:k)]
+  ytk <- arma22[1:(n - k)]
+  plot(ytk, yt, xlab = bquote(Y[t - .(k)]), ylab = expression(Y[t]),
+       main = paste0("Yt vs Yt-", k), pch = 19, col = "forestgreen")
+}
+par(mfrow = c(1, 1))
+```
+
+Ketiganya menunjukkan pola hubungan linear positif yang kuat, dengan kekuatan hubungan menurun bertahap seiring bertambahnya lag
+
+## Autokorelasi: Empiris vs Teoritis
+
+```{r arma22-acf-table}
+emp_manual_arma <- empirical_acf(arma22)
+emp_sim_arma    <- empirical_acf(arma22.sim)
+theo_arma22     <- ARMAacf(ar = c(phi1, phi2), ma = c(theta1, theta2), lag.max = 3)[2:4]
+
+tabel_arma22 <- data.frame(
+  Lag = 1:3,
+  Empiris_Manual = round(emp_manual_arma, 4),
+  Empiris_arimasim = round(emp_sim_arma, 4),
+  Teoritis = round(theo_arma22, 4)
+)
+knitr::kable(tabel_arma22)
+```
+
+Nilai autokorelasi empiris konsisten satu sama lain dan searah dengan nilai teoritis, dengan pola meluruh
+
+# 4.Kesimpulan
+
+Ketiga proses (MA(2), AR(2), ARMA(2,2)) yang dibangkitkan dengan $n=300$ data terbukti stasioner berdasarkan plot time series, ACF, dan PACF-nya. Pola identifikasi ordo melalui ACF/PACF/EACF sesuai teori:
+
+- **MA(2)**: ACF *cuts off* setelah lag 2, PACF *tails off*.
+- **AR(2)**: ACF *tails off*, PACF *cuts off* setelah lag 2.
+- **ARMA(2,2)**: ACF dan PACF sama-sama *tails off*.
+
+Nilai autokorelasi empiris dari data bangkitan secara konsisten mendekati nilai autokorelasi teoritis pada setiap proses, menunjukkan bahwa pembangkitan data manual di R berhasil merepresentasikan model AR/MA/ARMA yang diinginkan dengan tepat.
