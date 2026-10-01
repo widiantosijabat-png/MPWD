@@ -1,0 +1,397 @@
+---
+title: "Pemodelan ARIMA"
+author: "Widianto Sijabat"
+date: "1 Oktober 2026"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    number_sections: false
+    code_folding: show
+    df_print: paged
+    self_contained: true
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
+                      fig.align = "center", fig.width = 8, fig.height = 4.5)
+```
+
+# Pendahuluan
+
+Laporan ini membangun model ARIMA untuk data suhu rata-rata harian (TG)
+Stasiun Meteorologi Kemayoran (STAID 180), Jakarta, yang bersumber dari
+Southeast Asian Climate Assessment & Dataset (SACA&D).
+
+```{r packages}
+library(tseries)   
+library(MASS)      
+library(forecast)   
+library(TSA)        
+library(lmtest)     
+```
+
+# Persiapan Data
+
+## Impor dan Penyesuaian Data
+
+File `TG_STAID000180.txt` berisi 4 kolom: `SOUID`, `DATE` (YYYYMMDD),
+`TG` (suhu rata-rata dalam 0,1 °C), dan `Q_TG` (kode mutu; 0 = valid, 1
+= suspect, 9 = missing). Nilai hilang berkode `-9999`. Sebanyak 19 baris
+pertama adalah keterangan sehingga dilewati.
+
+```{r impor}
+raw <- read.csv("C:\\Users\\AXIOO\\Downloads\\SACA_blended_custom\\TG_STAID000180.txt", skip = 19, strip.white = TRUE)
+raw$DATE <- as.Date(as.character(raw$DATE), format = "%Y%m%d")
+
+cat("Total baris          :", nrow(raw), "\n")
+cat("Rentang tanggal      :", format(min(raw$DATE)), "s.d.", format(max(raw$DATE)), "\n")
+cat("Baris dengan data    :", sum(raw$TG != -9999), "\n")
+cat("Baris missing (-9999):", sum(raw$TG == -9999), "\n")
+```
+
+amatan yang dipilih yaitu 1 Januari 1997 -- 31 Desember 1999.
+
+```{r subset}
+d <- subset(raw, DATE >= as.Date("1997-01-01") & DATE <= as.Date("1999-12-31"))
+d$suhu <- d$TG / 10          # konversi ke derajat Celsius
+
+cat("Jumlah amatan :", nrow(d), "\n")
+cat("Jumlah missing:", sum(d$TG == -9999), "\n")
+cat("Jumlah data berkode suspect (Q_TG = 1):", sum(d$Q_TG == 1), "\n")
+summary(d$suhu)
+```
+
+## Eksplorasi Data Penuh
+
+```{r plot-penuh}
+suhu.ts <- ts(d$suhu, start = c(1997, 1), frequency = 365)
+plot(d$DATE, d$suhu, type = "l", col = "navyblue",
+     xlab = "Tanggal", ylab = "Suhu rata-rata (°C)",
+     main = "Suhu Rata-rata Harian Kemayoran, 1997-1999")
+```
+
+Data bergerak di sekitar nilai tengah sekitar 28 °C tanpa tren naik atau
+turun yang jelas. Terdapat fluktuasi harian yang cukup besar dan
+beberapa hari dengan suhu rendah (hari berawan/hujan lebat).
+
+# Langkah 1: Pembagian Data Latih dan Data Uji
+
+Proporsi pembagian sekitar 92%:8%, dengan data uji dibuat selama 92 hari
+agar peramalan dapat dievaluasi untuk satu kuartal ke depan.
+
+```{r split}
+tgl.batas <- as.Date("1999-09-30")
+train <- d$suhu[d$DATE <= tgl.batas]
+test  <- d$suhu[d$DATE >  tgl.batas]
+
+c(Latih = length(train), Uji = length(test),
+  Proporsi_Latih = round(length(train) / nrow(d), 3))
+
+train.ts <- ts(train)
+test.ts  <- ts(test, start = length(train) + 1)
+```
+
+```{r plot-train-test}
+plot(d$DATE, d$suhu, type = "n", xlab = "Tanggal", ylab = "Suhu (°C)",
+     main = "Pembagian Data Latih dan Data Uji")
+lines(d$DATE[d$DATE <= tgl.batas], train, col = "navyblue")
+lines(d$DATE[d$DATE >  tgl.batas], test,  col = "red")
+abline(v = tgl.batas, lty = 2)
+legend("bottomleft", c("Latih", "Uji"), col = c("navyblue", "red"), lty = 1, bty = "n")
+```
+
+# Langkah 2: Uji Kestasioneran Data Latih
+
+## Langkah 2a: Stasioneritas dalam Rataan (ACF dan ADF)
+
+### Plot ACF
+
+```{r acf-train}
+acf(train.ts, lag.max = 40, main = "ACF Data Latih")
+```
+
+Plot ACF menurun perlahan (*tails off slowly*) dan nilainya tetap
+signifikan hingga lag-lag yang jauh. Pola ini menunjukkan data memiliki
+ketergantungan (memori) yang panjang, namun tidak turun secara linear
+seperti data yang ber-tren.
+
+### Uji ADF
+
+$H_0$ : Data tidak stasioner dalam rataan
+
+$H_1$ : Data stasioner dalam rataan
+
+```{r adf-train}
+adf.test(train.ts)
+```
+
+Nilai *p-value* uji ADF sebesar 0,01 (batas terkecil yang dilaporkan)
+lebih kecil dari taraf nyata 5% sehingga tolak $H_0$. Data latih
+**stasioner dalam rataan**, sehingga tidak diperlukan *differencing*.
+
+## Langkah 2b: Stasioneritas dalam Ragam (Box-Cox)
+
+```{r boxcox}
+index <- seq_along(train)
+bc <- boxcox(train ~ index, lambda = seq(-1, 8, by = 0.01))
+
+lambda.opt <- bc$x[which.max(bc$y)]
+ci.lambda  <- bc$x[bc$y > max(bc$y) - 0.5 * qchisq(0.95, 1)]
+
+c(Lambda_Optimum = lambda.opt,
+  Batas_Bawah = min(ci.lambda),
+  Batas_Atas  = max(ci.lambda))
+```
+
+## Langkah 2c: Penanganan Ketidakstasioneran (Transformasi / Differencing)
+
+```{r transformasi}
+lambda <- 3
+train.t <- BoxCox(train, lambda)
+train.t.ts <- ts(train.t)
+
+plot.ts(train.t.ts, xlab = "Waktu ", ylab = "Suhu tertransformasi",
+        col = "navyblue", main = "Data Latih Setelah Transformasi Box-Cox (lambda = 3)")
+```
+
+Pengecekan kembali kestasioneran data hasil transformasi:
+
+```{r cek-ulang}
+adf.test(train.t.ts)
+acf(train.t.ts, lag.max = 40, main = "ACF Data Latih Tertransformasi")
+```
+
+Uji ADF pada data hasil transformasi menghasilkan *p-value* 0,01
+sehingga data tetap stasioner dalam rataan. Pola ACF tidak berubah dari
+sebelumnya. Pemodelan selanjutnya menggunakan data latih hasil
+transformasi.
+
+# Langkah 3: Model Potensial
+
+## Langkah 3a: Identifikasi dengan ACF dan PACF
+
+```{r acf-pacf}
+par(mfrow = c(1, 2))
+acf(train.t.ts,  lag.max = 20, main = "ACF")
+pacf(train.t.ts, lag.max = 20, main = "PACF")
+par(mfrow = c(1, 1))
+```
+
+Plot ACF menurun perlahan (*tails off*) sedangkan plot PACF terpotong
+(*cuts off*) setelah beberapa lag awal (lag 1 sampai 4 yang menonjol).
+Hal ini mengarah pada model AR, yaitu **ARIMA(1,0,0)** dan
+**ARIMA(3,0,0)**.
+
+## Langkah 3b: Identifikasi dengan EACF
+
+```{r eacf}
+eacf(train.t.ts)
+```
+
+## Langkah 3c: Pendugaan Parameter dan Uji Signifikansi
+
+```{r pendugaan}
+m1 <- Arima(train.t.ts, order = c(1,0,0), method = "ML")
+m2 <- Arima(train.t.ts, order = c(3,0,0), method = "ML")
+m3 <- Arima(train.t.ts, order = c(1,0,2), method = "ML")
+m4 <- Arima(train.t.ts, order = c(2,0,1), method = "ML")
+m5 <- Arima(train.t.ts, order = c(2,0,2), method = "ML")
+m6 <- Arima(train.t.ts, order = c(3,0,3), method = "ML")
+```
+
+```{r uji-signifikansi}
+for (nm in c("m1","m2","m3","m4","m5","m6")) {
+  m <- get(nm)
+  cat("\n=====", paste0("ARIMA(", paste(arimaorder(m)[1:3], collapse = ","), ")"), "=====\n")
+  print(coeftest(m))
+}
+```
+
+## Langkah 3d: Perbandingan AIC dan Pemilihan Model
+
+```{r aic}
+daftar.model <- list("ARIMA(1,0,0)" = m1, "ARIMA(3,0,0)" = m2,
+                     "ARIMA(1,0,2)" = m3, "ARIMA(2,0,1)" = m4,
+                     "ARIMA(2,0,2)" = m5, "ARIMA(3,0,3)" = m6)
+
+semua.signif <- function(m) {
+  p <- coeftest(m)[, 4]
+  p <- p[!grepl("intercept", names(p))]
+  all(p < 0.05)
+}
+
+hasil.model <- data.frame(
+  Model = names(daftar.model),
+  AIC = sapply(daftar.model, AIC),
+  BIC = sapply(daftar.model, BIC),
+  Semua_Parameter_Signifikan = sapply(daftar.model, semua.signif),
+  row.names = NULL
+)
+hasil.model[order(hasil.model$AIC), ]
+```
+
+Berdasarkan pendugaan parameter, model ARIMA(1,0,2) memiliki nilai AIC
+dan BIC terkecil
+
+# Langkah 4: Analisis Sisaan
+
+Model terpilih dicek asumsi sisaannya: normalitas, kebebasan (tidak ada
+autokorelasi), kehomogenan ragam, dan nilai tengah sama dengan nol.
+
+```{r model-terpilih}
+model.final <- m3          # ARIMA(1,0,2)
+summary(model.final)
+sisaan <- as.numeric(residuals(model.final))
+```
+
+## Langkah 4a: Eksplorasi Sisaan
+
+```{r eksplorasi-sisaan, fig.height = 7}
+par(mfrow = c(2, 2))
+qqnorm(sisaan, main = "Normal Q-Q Plot Sisaan")
+qqline(sisaan, col = "blue", lwd = 2)
+plot(sisaan, type = "p", main = "Sisaan vs Waktu", xlab = "Waktu", ylab = "Sisaan")
+abline(h = 0, col = "red")
+acf(sisaan,  lag.max = 40, main = "ACF Sisaan")
+pacf(sisaan, lag.max = 40, main = "PACF Sisaan")
+par(mfrow = c(1, 1))
+```
+
+Plot kuantil-kuantil normal menunjukkan titik-titik sisaan mengikuti
+garis $45^{\circ}$ dengan sedikit penyimpangan di bagian ekor sehingga
+sisaan secara eksploratif mendekati normal. Plot sisaan terhadap waktu
+menyebar acak di sekitar nol dengan lebar pita yang relatif sama. Plot
+ACF dan PACF sisaan hanya memiliki satu spike yang sedikit keluar batas
+(lag 13 pada ACF dan lag 14 pada PACF) dari 40 lag yang diamati. Jumlah
+ini masih wajar secara kebetulan pada taraf 5%, sehingga sisaan secara
+eksploratif dapat dianggap saling bebas.
+
+## Langkah 4b: Uji Formal Sisaan
+
+### Normalitas (Kolmogorov-Smirnov)
+
+$H_0$ : Sisaan menyebar normal
+
+$H_1$ : Sisaan tidak menyebar normal
+
+```{r ks}
+ks.test(sisaan, "pnorm", mean(sisaan), sd(sisaan))
+```
+
+### Kebebasan Sisaan (Ljung-Box)
+
+$H_0$ : Sisaan saling bebas
+
+$H_1$ : Sisaan tidak saling bebas
+
+```{r lb}
+Box.test(sisaan, lag = 20, type = "Ljung-Box", fitdf = 3)
+```
+
+### Kehomogenan Ragam (Ljung-Box pada Sisaan Kuadrat)
+
+$H_0$ : Ragam sisaan homogen
+
+$H_1$ : Ragam sisaan tidak homogen
+
+```{r lb2}
+Box.test(sisaan^2, lag = 20, type = "Ljung-Box")
+```
+
+### Nilai Tengah Sisaan (Uji-t)
+
+$H_0$ : Nilai tengah sisaan sama dengan 0
+
+$H_1$ : Nilai tengah sisaan tidak sama dengan 0
+
+```{r ttest}
+t.test(sisaan, mu = 0, conf.level = 0.95)
+```
+
+| Asumsi | Uji | *p-value* | Keputusan |
+|------------------|------------------|------------------|------------------|
+| Normalitas | Kolmogorov-Smirnov | 0,3093 | Gagal tolak $H_0$, sisaan menyebar normal |
+| Kebebasan | Ljung-Box | 0,0989 | Gagal tolak $H_0$, sisaan saling bebas |
+| Homogenitas ragam | Ljung-Box (sisaan kuadrat) | 0,1444 | Gagal tolak $H_0$, ragam sisaan homogen |
+| Nilai tengah nol | Uji-t | 0,7022 | Gagal tolak $H_0$, nilai tengah sisaan sama dengan 0 |
+
+# Langkah 5: Overfitting
+
+*Overfitting* dilakukan dengan menaikkan orde AR dan MA model terpilih
+ARIMA(1,0,2) satu tingkat, yaitu ARIMA(2,0,2) dan ARIMA(1,0,3).
+
+```{r overfit}
+m3a <- Arima(train.t.ts, order = c(2,0,2), method = "ML")
+m3b <- Arima(train.t.ts, order = c(1,0,3), method = "ML")
+
+cat("===== ARIMA(2,0,2) =====\n"); print(coeftest(m3a))
+cat("\n===== ARIMA(1,0,3) =====\n"); print(coeftest(m3b))
+
+data.frame(
+  Model = c("ARIMA(1,0,2)", "ARIMA(2,0,2)", "ARIMA(1,0,3)"),
+  AIC = c(AIC(m3), AIC(m3a), AIC(m3b)),
+  BIC = c(BIC(m3), BIC(m3a), BIC(m3b)),
+  Semua_Parameter_Signifikan = c(semua.signif(m3), semua.signif(m3a), semua.signif(m3b))
+)
+```
+
+Model hasil *overfitting* tidak lebih baik daripada ARIMA(1,0,2).
+ARIMA(2,0,2) memiliki AIC (16386,60) dan BIC yang lebih besar serta
+parameter `ar1` tidak signifikan. ARIMA(1,0,3) memiliki AIC (16378,09)
+dan BIC yang juga lebih besar dan parameter `ma3` tidak signifikan
+(*p-value* 0,248). Dengan demikian model **ARIMA(1,0,2)** tetap dipilih
+untuk peramalan.
+
+# Langkah 6: Peramalan (Forecast)
+
+Peramalan dilakukan sepanjang data uji (92 hari).
+
+```{r forecast}
+h <- length(test)
+ramalan <- forecast(model.final, h = h, level = 95)
+
+ramalan.asli <- InvBoxCox(as.numeric(ramalan$mean),  lambda)
+bawah.asli   <- InvBoxCox(as.numeric(ramalan$lower), lambda)
+atas.asli    <- InvBoxCox(as.numeric(ramalan$upper), lambda)
+
+head(data.frame(Hari = 1:h, Aktual = test, Ramalan = round(ramalan.asli, 2),
+                Bawah95 = round(bawah.asli, 2), Atas95 = round(atas.asli, 2)), 10)
+```
+
+```{r plot-forecast}
+
+data.ramalan <- ramalan$mean
+plot(ramalan)
+tgl.latih <- d$DATE[d$DATE <= tgl.batas]
+tgl.uji   <- d$DATE[d$DATE >  tgl.batas]
+tampil    <- tail(seq_along(train), 150)      # 150 hari terakhir data latih
+
+plot(c(tgl.latih[tampil], tgl.uji),
+     c(train[tampil], test), type = "n",
+     ylim = range(c(train[tampil], test, bawah.asli, atas.asli)),
+     xlab = "Tanggal", ylab = "Suhu (°C)",
+     main = "Peramalan ARIMA(1,0,2) vs Data Uji")
+polygon(c(tgl.uji, rev(tgl.uji)), c(bawah.asli, rev(atas.asli)),
+        col = rgb(0, 0, 1, 0.12), border = NA)
+lines(tgl.latih[tampil], train[tampil], col = "black")
+lines(tgl.uji, test, col = "red")
+lines(tgl.uji, ramalan.asli, col = "blue", lwd = 2, lty = 2)
+abline(v = tgl.batas, lty = 3)
+legend("bottomleft", c("Latih", "Aktual (uji)", "Ramalan", "Selang 95%"),
+       col = c("black", "red", "blue", rgb(0,0,1,0.3)),
+       lty = c(1, 1, 2, NA), lwd = c(1, 1, 2, NA), pch = c(NA, NA, NA, 15), bty = "n")
+```
+
+## Langkah 6a: Akurasi Peramalan
+
+```{r akurasi}
+akurasi <- accuracy(ramalan.asli, test)
+akurasi
+
+cakupan <- mean(test >= bawah.asli & test <= atas.asli)
+```
